@@ -6,19 +6,12 @@ interface EndScreenProps {
   names: [string, string];
   onPlayAgain: () => void;
   onBackToHome: () => void;
-  isHost: boolean;
-  mode: string;
 }
 
-export function EndScreen({ winner, scores, names, onPlayAgain, onBackToHome, isHost, mode }: EndScreenProps) {
-  const myPlayerNum = isHost ? 1 : 2;
-  const isMe = mode !== 'local' && winner === myPlayerNum;
-  
+export function EndScreen({ winner, scores, names, onPlayAgain, onBackToHome }: EndScreenProps) {
   const winnerName = winner === 0 
     ? "It's a Tie!" 
-    : isMe 
-      ? "You Win!" 
-      : `${names[winner - 1]} Wins!`;
+    : `${names[winner - 1]} Wins!`;
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center px-6 py-8">
@@ -59,7 +52,7 @@ export function EndScreen({ winner, scores, names, onPlayAgain, onBackToHome, is
                 {scores[0]}
               </div>
               <div className="text-base" style={{ color: 'var(--ink)', fontWeight: winner === 1 ? 600 : 400 }}>
-                {names[0]} {mode !== 'local' && isHost && <span className="text-xs opacity-50 block">(You)</span>}
+                {names[0]}
               </div>
             </div>
           </div>
@@ -93,7 +86,7 @@ export function EndScreen({ winner, scores, names, onPlayAgain, onBackToHome, is
                 {scores[1]}
               </div>
               <div className="text-base" style={{ color: 'var(--ink)', fontWeight: winner === 2 ? 600 : 400 }}>
-                {names[1]} {mode !== 'local' && !isHost && <span className="text-xs opacity-50 block">(You)</span>}
+                {names[1]}
               </div>
             </div>
           </div>

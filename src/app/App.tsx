@@ -1,30 +1,12 @@
 import { useState, useEffect, useRef, Component, type ReactNode } from 'react';
+import { io, type Socket } from 'socket.io-client';
 import { HomeScreen } from './components/HomeScreen';
-import { RoomCodeScreen } from './components/RoomCodeScreen';
 import { ModeSelectionModal } from './components/ModeSelectionModal';
+import { RoomCodeScreen } from './components/RoomCodeScreen';
 import { GameScreen } from './components/GameScreen';
 import { EndScreen } from './components/EndScreen';
-import Peer, { type DataConnection } from 'peerjs';
 
 type Screen = 'home' | 'roomCode' | 'game' | 'end';
-type GameMode = 'quick' | 'online' | 'local';
-
-const APP_PREFIX = 'db-v1'; // Shorter prefix
-const PEER_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:stun.voiparound.com' },
-    { urls: 'stun:stun.voipbuster.com' },
-    { urls: 'stun:stun.voipstunt.com' },
-    { urls: 'stun:stun.voxgratia.org' },
-  ],
-  reliable: true,
-  debug: 1
-};
 
 // Error Boundary Component
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
@@ -71,27 +53,25 @@ export default function App() {
 function GameApp() {
   const [screen, setScreen] = useState<Screen>('home');
   const [isDark, setIsDark] = useState(false);
-  const [gameMode, setGameMode] = useState<GameMode>('quick');
+  const [gameMode, setGameMode] = useState<'local' | 'online'>('local');
   const [turnTime, setTurnTime] = useState(30);
+  const [gridSize, setGridSize] = useState(7);
   const [showModeModal, setShowModeModal] = useState(false);
   const [winner, setWinner] = useState(0);
   const [finalScores, setFinalScores] = useState<[number, number]>([0, 0]);
   const [finalNames, setFinalNames] = useState<[string, string]>(['Player 1', 'Player 2']);
-  
-  // Networking state
-  const [peer, setPeer] = useState<Peer | null>(null);
-  const [connection, setConnection] = useState<DataConnection | null>(null);
-  const connectionRef = useRef<DataConnection | null>(null);
-  const peerRef = useRef<Peer | null>(null);
-  const [isHost, setIsHost] = useState(true);
+  const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(null);
+  const [roomId, setRoomId] = useState<string | null>(null);
+  const [playerNumber, setPlayerNumber] = useState<1 | 2 | null>(null);
+  const [isRoomMatched, setIsRoomMatched] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [searchStatus, setSearchStatus] = useState('');
   const [playerLeft, setPlayerLeft] = useState(false);
-  const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(null);
-  const [searchTimeLeft, setSearchTimeLeft] = useState(60);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const searchIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [roomError, setRoomError] = useState<string | null>(null);
+  const [hasConfig, setHasConfig] = useState(false);
+  const [pendingConfig, setPendingConfig] = useState<{ turnTime: number; gridSize: number } | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
     if (isDark) {
@@ -101,340 +81,178 @@ function GameApp() {
     }
   }, [isDark]);
 
-  // Clean up connection on unmount or screen change
   useEffect(() => {
-    if (screen === 'home') {
-      console.log('Cleaning up peer and connection...');
-      connectionRef.current?.close();
-      peerRef.current?.destroy();
-      setConnection(null);
-      setPeer(null);
-      connectionRef.current = null;
-      peerRef.current = null;
-    }
-    return () => {
-      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-      if (searchIntervalRef.current) clearInterval(searchIntervalRef.current);
-    };
-  }, [screen]);
+    if (!socket) return;
 
-  const initPeer = (id?: string) => {
-    try {
-      console.log('Initializing Peer with ID:', id || 'random');
-      // Destroy existing peer if it exists
-      peerRef.current?.destroy();
-      
-      const newPeer = new Peer(id, PEER_CONFIG);
-      peerRef.current = newPeer;
-      setPeer(newPeer);
-
-      newPeer.on('connection', (conn) => {
-      console.log('Peer received connection');
-      setConnection(conn);
-      connectionRef.current = conn;
-      setIsHost(true);
-      setScreen('game');
-      setPlayerLeft(false);
-
-      conn.on('close', () => {
-        console.log('Connection closed by peer');
-        setPlayerLeft(true);
-      });
-    });
-
-      newPeer.on('error', (err) => {
-        console.error('Peer error:', err.type, err.message);
-        if (err.type === 'unavailable-id') {
-          setSearchError('Room code is already in use or unavailable.');
-        } else if (err.type === 'peer-unavailable') {
-          // This is expected during matchmaking, handled in tryConnect
-        } else {
-          setSearchError(`Connection error: ${err.type}. Please try again.`);
-        }
-        setIsSearching(false);
-      });
-
-      newPeer.on('open', (myId) => {
-        console.log('Peer opened with ID:', myId);
-      });
-
-      return newPeer;
-    } catch (e) {
-      console.error('Failed to init Peer:', e);
-      setSearchError('Could not initialize networking. Please check your connection.');
-      return null;
-    }
-  };
-
-  const handleQuickPlay = async () => {
-    console.log('Starting Quick Play (Robust Sequential)...');
-    setGameMode('quick');
-    setTurnTime(30);
-    setIsSearching(true);
-    setSearchStatus('Starting search...');
-    setSearchTimeLeft(60);
-    setSearchError(null);
-    connectionRef.current = null;
-
-    // Symmetry breaking: random delay to prevent two devices from 
-    // trying to host/join the exact same slot at the exact same millisecond
-    const jitter = Math.random() * 1500;
-    await new Promise(r => setTimeout(r, jitter));
-
-    const trySlot = (index: number) => {
-      if (!isSearching && screen !== 'home') return; // Stop if cancelled
-      
-      if (index > 5) { // Try up to 5 slots
-        const fallbackId = `${APP_PREFIX}-q-${Math.floor(Math.random() * 1000)}`;
-        setSearchStatus('Lobbies busy, hosting new...');
-        startHostingSlot(fallbackId, index, true);
-        return;
+    const handleWaiting = ({ roomId: waitingRoomId, playerNumber: waitingPlayerNumber }: { roomId: string; playerNumber: number }) => {
+      setRoomId(waitingRoomId);
+      setPlayerNumber(waitingPlayerNumber === 1 ? 1 : 2);
+      setIsRoomMatched(false);
+      setSearchStatus('Waiting for another player...');
+      if (pendingConfig) {
+        socket.emit('game:config', { roomId: waitingRoomId, ...pendingConfig });
+        setHasConfig(true);
       }
-
-      const lobbyId = `${APP_PREFIX}-lobby-${index}`;
-      setSearchStatus(`Searching Lobby ${index}...`);
-      
-      if (peerRef.current) {
-        peerRef.current.destroy();
-        peerRef.current = null;
-      }
-
-      // Step 1: Create a generic peer to check if the lobby exists
-      const p = new Peer(PEER_CONFIG);
-      peerRef.current = p;
-      setPeer(p);
-
-      p.on('open', () => {
-        console.log(`Checking slot ${index}...`);
-        const conn = p.connect(lobbyId, { reliable: true });
-        
-        let hasTimedOut = false;
-        const joinTimeout = setTimeout(() => {
-          hasTimedOut = true;
-          console.log(`Slot ${index} empty, becoming host...`);
-          conn.close();
-          p.destroy();
-          startHostingSlot(lobbyId, index);
-        }, 3500);
-
-        conn.on('open', () => {
-          if (hasTimedOut) return;
-          clearTimeout(joinTimeout);
-          console.log(`Connected to Lobby ${index}`);
-          setSearchStatus('Found opponent! Handshaking...');
-          finalizeConnection(conn, false);
-        });
-
-        conn.on('error', (err) => {
-          if (hasTimedOut) return;
-          clearTimeout(joinTimeout);
-          console.log(`Lobby ${index} unavailable (${err.type}), hosting...`);
-          p.destroy();
-          startHostingSlot(lobbyId, index);
-        });
-      });
-
-      p.on('error', (err) => {
-        console.error('Peer creation error:', err);
-        if (isSearching) setTimeout(() => trySlot(index + 1), 1000);
-      });
     };
 
-    const startHostingSlot = (lobbyId: string, index: number, isFallback = false) => {
-      if (peerRef.current) peerRef.current.destroy();
-      
-      const p = new Peer(lobbyId, PEER_CONFIG);
-      peerRef.current = p;
-      setPeer(p);
-
-      p.on('open', (id) => {
-        console.log(`Hosting Lobby ${index} (${id})`);
-        setSearchStatus(`Waiting in Lobby ${index}...`);
-        setupHostListeners(p);
-      });
-
-      p.on('error', (err) => {
-        if (err.type === 'unavailable-id') {
-          console.log(`Lobby ${index} just got taken, joining it instead...`);
-          p.destroy();
-          // Someone else just claimed it, try to join them
-          setTimeout(() => tryJoin(lobbyId, index), 500);
-        } else {
-          console.error(`Host error on ${index}:`, err.type);
-          p.destroy();
-          if (!isFallback) trySlot(index + 1);
-        }
-      });
-    };
-
-    const tryJoin = (lobbyId: string, index: number) => {
-      if (peerRef.current) peerRef.current.destroy();
-      const p = new Peer(PEER_CONFIG);
-      peerRef.current = p;
-      setPeer(p);
-
-      p.on('open', () => {
-        setSearchStatus(`Joining Lobby ${index}...`);
-        const conn = p.connect(lobbyId, { reliable: true });
-        
-        const t = setTimeout(() => {
-          conn.close();
-          p.destroy();
-          trySlot(index + 1);
-        }, 5000);
-
-        conn.on('open', () => {
-          clearTimeout(t);
-          finalizeConnection(conn, false);
-        });
-        
-        conn.on('error', () => {
-          clearTimeout(t);
-          p.destroy();
-          trySlot(index + 1);
-        });
-      });
-    };
-
-    const startHosting = (id: string) => {
-      const p = new Peer(id, PEER_CONFIG);
-      peerRef.current = p;
-      setPeer(p);
-      p.on('open', () => setupHostListeners(p));
-      p.on('error', () => {
-        setSearchError('Networking error. Please try again.');
-        setIsSearching(false);
-      });
-    };
-
-    const setupHostListeners = (p: Peer) => {
-      p.on('connection', (conn) => {
-        console.log('Matchmaking: Guest joined our lobby! Waiting for data channel to open...');
-        setSearchStatus('Connecting to guest...');
-        
-        // Host MUST wait for the 'open' event before sending any data or switching screens
-        conn.on('open', () => {
-          console.log('Matchmaking: Host data channel opened');
-          finalizeConnection(conn, true);
-        });
-
-        conn.on('error', (err) => {
-          console.error('Matchmaking: Host connection error:', err);
-          setIsSearching(false);
-          setSearchError('Failed to establish connection with player.');
-        });
-      });
-    };
-
-    const finalizeConnection = (conn: DataConnection, hostStatus: boolean) => {
-      console.log('Finalizing connection, hostStatus:', hostStatus);
-      if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-      if (searchIntervalRef.current) clearInterval(searchIntervalRef.current);
-      
-      setConnection(conn);
-      connectionRef.current = conn;
-      setIsHost(hostStatus);
-      setScreen('game');
+    const handleMatched = ({ roomId: matchedRoomId, players }: { roomId: string; players: Array<{ id: string; playerNumber: number }> }) => {
+      const mySocketId = socket.id;
+      const me = players.find((player) => player.id === mySocketId);
+      const assigned = me?.playerNumber === 2 ? 2 : 1;
+      setRoomId(matchedRoomId);
+      setPlayerNumber(assigned);
+      setIsRoomMatched(true);
       setIsSearching(false);
       setSearchStatus('');
-      setSearchError(null);
       setPlayerLeft(false);
-
-      conn.on('close', () => {
-        console.log('Connection closed');
-        setPlayerLeft(true);
-      });
-
-      // Heartbeat to keep connection alive, especially on mobile
-      const heartbeat = setInterval(() => {
-        if (conn.open) {
-          conn.send({ type: 'heartbeat' });
-        } else {
-          clearInterval(heartbeat);
-        }
-      }, 5000);
-
-      // Add a small delay for state to propagate
-      setTimeout(() => {
-        if (hostStatus) {
-          console.log('Host sending initial sync...');
-          conn.send({ type: 'handshake', from: 'host' });
-        }
-      }, 500);
+      setGameMode('online');
+      if (matchedRoomId.startsWith('code-') && !hasConfig) {
+        setSearchStatus('Waiting for host to choose settings...');
+      } else {
+        setScreen('game');
+      }
     };
 
-    // Start search from slot 1
-    trySlot(1);
+    const handleOpponentLeft = () => {
+      setPlayerLeft(true);
+      setRoomId(null);
+      setPlayerNumber(null);
+      setIsSearching(false);
+      setSearchStatus('');
+    };
 
-    // Global Timeout logic
-    searchTimeoutRef.current = setTimeout(() => {
-      if (!connectionRef.current) {
-        setIsSearching(false);
-        setSearchError('No players available at the moment. Please try again!');
-        peerRef.current?.destroy();
-        setPeer(null);
+    const handlePlayAgain = () => {
+      setScreen('game');
+    };
+
+    const handleConfig = ({ turnTime: configTurnTime, gridSize: configGridSize }: { turnTime: number; gridSize: number }) => {
+      setTurnTime(configTurnTime);
+      setGridSize(configGridSize);
+      setHasConfig(true);
+      setSearchStatus('');
+      if (roomId?.startsWith('code-') && !isRoomMatched) {
+        return;
       }
-    }, 60000);
+      setScreen('game');
+    };
 
-    searchIntervalRef.current = setInterval(() => {
-      setSearchTimeLeft(prev => prev > 0 ? prev - 1 : 0);
-    }, 1000);
+    const handleRoomError = ({ message }: { message: string }) => {
+      setRoomError(message);
+    };
+
+    socket.on('quickplay:waiting', handleWaiting);
+    socket.on('quickplay:matched', handleMatched);
+    socket.on('room:waiting', handleWaiting);
+    socket.on('room:matched', handleMatched);
+    socket.on('room:error', handleRoomError);
+    socket.on('game:config', handleConfig);
+    socket.on('game:opponentLeft', handleOpponentLeft);
+    socket.on('game:playAgain', handlePlayAgain);
+
+    return () => {
+      socket.off('quickplay:waiting', handleWaiting);
+      socket.off('quickplay:matched', handleMatched);
+      socket.off('room:waiting', handleWaiting);
+      socket.off('room:matched', handleMatched);
+      socket.off('room:error', handleRoomError);
+      socket.off('game:config', handleConfig);
+      socket.off('game:opponentLeft', handleOpponentLeft);
+      socket.off('game:playAgain', handlePlayAgain);
+    };
+  }, [socket, pendingConfig, hasConfig]);
+
+  // Clean up on unmount, screen change, or tab close
+  useEffect(() => {
+    const handleUnload = () => {
+      if (socketRef.current && roomId) {
+        socketRef.current.emit('game:leave');
+      }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+    };
+  }, [screen, roomId]);
+  const handleSameDevice = () => {
+    setGameMode('local');
+    setHasConfig(true);
+    setPendingConfig(null);
+    setShowModeModal(true);
+  };
+
+  const handleQuickPlay = () => {
+    const socketUrl = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
+    if (!socketRef.current) {
+      socketRef.current = io(socketUrl, { transports: ['websocket'] });
+      setSocket(socketRef.current);
+    }
+    setGameMode('online');
+    setTurnTime(30);
+    setGridSize(5);
+    setHasConfig(true);
+    setPendingConfig(null);
+    setIsSearching(true);
+    setSearchStatus('Searching for a player...');
+    setIsRoomMatched(false);
+    socketRef.current.emit('quickplay:join', { name: 'Player' });
   };
 
   const handlePlayOnline = () => {
     setGameMode('online');
-    setIsHost(true);
+    setHasConfig(false);
+    setPendingConfig(null);
+    setIsRoomMatched(false);
     setScreen('roomCode');
   };
 
-  const handleSameDevice = () => {
-    setGameMode('local');
-    setIsHost(true);
-    setShowModeModal(true);
-  };
-
-  const handleSelectMode = (seconds: number) => {
-    setTurnTime(seconds);
-    setShowModeModal(false);
-
-    if (gameMode === 'online' && pendingRoomCode) {
-      initPeer(`${APP_PREFIX}-room-${pendingRoomCode}`);
-      // The RoomCodeScreen will transition itself based on the modal closing
-    } else if (gameMode === 'local') {
-      setScreen('game');
-    }
-  };
-
   const handleCreateRoom = (code: string) => {
+    const socketUrl = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
+    if (!socketRef.current) {
+      socketRef.current = io(socketUrl, { transports: ['websocket'] });
+      setSocket(socketRef.current);
+    }
     setPendingRoomCode(code);
+    setHasConfig(false);
+    setPendingConfig(null);
+    setIsRoomMatched(false);
+    setRoomError(null);
+    socketRef.current.emit('room:create', { code, name: 'Player' });
     setShowModeModal(true);
   };
 
   const handleJoinRoom = (code: string) => {
-    setIsHost(false);
-    setGameMode('online');
-    const p = initPeer();
-    if (!p) return;
-    
-    p.on('open', () => {
-      const conn = p.connect(`${APP_PREFIX}-room-${code}`, { reliable: true });
-      conn.on('open', () => {
-        setConnection(conn);
-        connectionRef.current = conn;
-        // Turn time will be synced from the host via names packet or a new config packet
-        setScreen('game');
-        setPlayerLeft(false);
+    const socketUrl = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
+    if (!socketRef.current) {
+      socketRef.current = io(socketUrl, { transports: ['websocket'] });
+      setSocket(socketRef.current);
+    }
+    setHasConfig(false);
+    setPendingConfig(null);
+    setIsRoomMatched(false);
+    setRoomError(null);
+    socketRef.current.emit('room:join', { code, name: 'Player' });
+  };
 
-        conn.on('close', () => {
-          console.log('Connection closed by host');
-          setPlayerLeft(true);
-        });
-      });
-      conn.on('error', (err) => {
-        console.error('Connection error:', err);
-        setSearchError('Failed to join the room. Please check the code.');
-      });
-    });
+  const handleSelectMode = (seconds: number, selectedGridSize: number) => {
+    setTurnTime(seconds);
+    setGridSize(selectedGridSize);
+    setShowModeModal(false);
+
+    if (gameMode === 'online' && roomId) {
+      const configPayload = { turnTime: seconds, gridSize: selectedGridSize };
+      socketRef.current?.emit('game:config', { roomId, ...configPayload });
+      setHasConfig(true);
+      setPendingConfig(null);
+      if (!roomId.startsWith('code-') || isRoomMatched) {
+        setScreen('game');
+      }
+    } else if (gameMode === 'online') {
+      setPendingConfig({ turnTime: seconds, gridSize: selectedGridSize });
+    } else {
+      setScreen('game');
+    }
   };
 
   const handleGameEnd = (winnerPlayer: number, scores: [number, number], names: [string, string]) => {
@@ -445,25 +263,51 @@ function GameApp() {
   };
 
   const handlePlayAgain = () => {
+    if (gameMode === 'online' && socketRef.current && roomId) {
+      socketRef.current.emit('game:playAgain', { roomId });
+    }
     setScreen('game');
   };
 
   const handleBackToHome = () => {
-    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-    if (searchIntervalRef.current) clearInterval(searchIntervalRef.current);
-    peerRef.current?.destroy();
-    setPeer(null);
-    setConnection(null);
-    connectionRef.current = null;
-    peerRef.current = null;
+    if (isSearching && socketRef.current) {
+      socketRef.current.emit('quickplay:cancel');
+    }
+    if (screen === 'roomCode' && socketRef.current) {
+      socketRef.current.emit('room:cancel');
+    }
+    if (gameMode === 'online' && socketRef.current) {
+      socketRef.current.emit('game:leave');
+    }
     setIsSearching(false);
-    setSearchError(null);
+    setSearchStatus('');
+    setRoomId(null);
+    setPlayerNumber(null);
     setPlayerLeft(false);
+    setPendingRoomCode(null);
+    setRoomError(null);
+    setHasConfig(false);
+    setPendingConfig(null);
+    setIsRoomMatched(false);
     setScreen('home');
   };
 
   return (
     <div className="size-full">
+      {roomError && (
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6">
+          <div className="bg-[var(--paper)] p-8 rounded-2xl border-3 border-[var(--ink)] max-w-sm w-full text-center">
+            <h3 className="text-2xl mb-4" style={{ color: 'var(--ink)' }}>Room Error</h3>
+            <p className="mb-6 opacity-70" style={{ color: 'var(--ink)' }}>{roomError}</p>
+            <button 
+              onClick={() => setRoomError(null)}
+              className="w-full py-3 bg-[var(--ink)] text-[var(--paper)] rounded-xl transition-all active:scale-95 shadow-lg"
+            >
+              Okay
+            </button>
+          </div>
+        </div>
+      )}
       {playerLeft && (
         <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6">
           <div className="bg-[var(--paper)] p-8 rounded-2xl border-3 border-[var(--ink)] max-w-sm w-full text-center">
@@ -487,9 +331,6 @@ function GameApp() {
           <div className="bg-[var(--paper)] p-8 rounded-2xl border-3 border-[var(--ink)] max-w-sm w-full text-center">
             <h3 className="text-2xl mb-2" style={{ color: 'var(--ink)' }}>Finding Player...</h3>
             <p className="text-sm mb-4 opacity-70 italic" style={{ color: 'var(--ink)' }}>{searchStatus}</p>
-            <div className="text-4xl font-bold mb-6" style={{ color: 'var(--ink)' }}>
-              {Math.floor(searchTimeLeft / 60)}:{(searchTimeLeft % 60).toString().padStart(2, '0')}
-            </div>
             <div className="flex justify-center gap-3 mb-6">
               {[0, 1, 2].map(i => (
                 <div 
@@ -501,31 +342,16 @@ function GameApp() {
             </div>
             <button 
               onClick={() => {
-                if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
-                if (searchIntervalRef.current) clearInterval(searchIntervalRef.current);
+                if (socketRef.current) {
+                  socketRef.current.emit('quickplay:cancel');
+                }
                 setIsSearching(false);
-                peer?.destroy();
-                setPeer(null);
+                setSearchStatus('');
               }}
               className="w-full py-3 border-2 border-[var(--ink)] rounded-xl transition-all active:scale-95"
               style={{ color: 'var(--ink)' }}
             >
               Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {searchError && screen === 'home' && (
-        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-6">
-          <div className="bg-[var(--paper)] p-8 rounded-2xl border-3 border-[var(--ink)] max-w-sm w-full text-center">
-            <h3 className="text-2xl mb-4" style={{ color: 'var(--ink)' }}>No Players Found</h3>
-            <p className="mb-6 opacity-70" style={{ color: 'var(--ink)' }}>{searchError}</p>
-            <button 
-              onClick={() => setSearchError(null)}
-              className="w-full py-3 bg-[var(--ink)] text-[var(--paper)] rounded-xl transition-all active:scale-95 shadow-lg"
-            >
-              Okay
             </button>
           </div>
         </div>
@@ -546,19 +372,20 @@ function GameApp() {
           onBack={handleBackToHome}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
-          isWaiting={!!(connection || (gameMode === 'online' && !showModeModal && pendingRoomCode === null && peer))}
+          activeRoomCode={pendingRoomCode}
         />
       )}
 
       {screen === 'game' && (
         <GameScreen
-          gridSize={5}
+          gridSize={gridSize}
           mode={gameMode}
           turnTime={turnTime}
           onBack={handleBackToHome}
           onGameEnd={handleGameEnd}
-          connection={connection}
-          isHost={isHost}
+          socket={socket}
+          roomId={roomId}
+          playerNumber={playerNumber}
         />
       )}
 
@@ -569,8 +396,6 @@ function GameApp() {
           names={finalNames}
           onPlayAgain={handlePlayAgain}
           onBackToHome={handleBackToHome}
-          isHost={isHost}
-          mode={gameMode}
         />
       )}
 
@@ -578,7 +403,6 @@ function GameApp() {
         <ModeSelectionModal
           onClose={() => {
             setShowModeModal(false);
-            setPendingRoomCode(null);
           }}
           onSelectMode={handleSelectMode}
         />

@@ -1,15 +1,16 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ArrowLeft, Pause, Pencil } from 'lucide-react';
-import type { DataConnection } from 'peerjs';
+import type { Socket } from 'socket.io-client';
 
 interface GameScreenProps {
   gridSize: number;
-  mode: 'quick' | 'online' | 'local';
+  mode: 'local' | 'online';
   turnTime: number;
   onBack: () => void;
   onGameEnd: (winner: number, scores: [number, number], names: [string, string]) => void;
-  connection?: DataConnection | null;
-  isHost?: boolean;
+  socket?: Socket | null;
+  roomId?: string | null;
+  playerNumber?: 1 | 2 | null;
 }
 
 type LineId = string;
@@ -20,32 +21,38 @@ const CELL_SIZE = 24;
 
 export function GameScreen({ 
   gridSize, 
-  mode, 
+  mode,
   turnTime, 
   onBack, 
   onGameEnd,
-  connection,
-  isHost = true 
+  socket,
+  roomId,
+  playerNumber
 }: GameScreenProps) {
   const [lines, setLines] = useState<Map<LineId, number>>(new Map());
   const [boxes, setBoxes] = useState<Map<string, number>>(new Map());
   const [currentPlayer, setCurrentPlayer] = useState<1 | 2>(1);
   const [scores, setScores] = useState<[number, number]>([0, 0]);
   const [isPaused, setIsPaused] = useState(false);
+  const [isGameOver, setIsGameOver] = useState(false);
   const [newBoxes, setNewBoxes] = useState<Set<string>>(new Set());
   const [localTurnTime, setLocalTurnTime] = useState(turnTime);
+  const [localGridSize, setLocalGridSize] = useState(gridSize);
   const [timeLeft, setTimeLeft] = useState(turnTime);
   const [player1Name, setPlayer1Name] = useState('Player 1');
   const [player2Name, setPlayer2Name] = useState('Player 2');
   const [editingPlayer, setEditingPlayer] = useState<1 | 2 | null>(null);
+  const lastMoveTime = useRef(0);
 
-  const myPlayerNum = isHost ? 1 : 2;
-  const isMyTurn = mode === 'local' || currentPlayer === myPlayerNum;
+  const isOnline = mode === 'online' && !!socket && !!roomId && !!playerNumber;
+  const isHost = isOnline && playerNumber === 1;
+  const isMyTurn = !isOnline || currentPlayer === playerNumber;
 
   useEffect(() => {
     setLocalTurnTime(turnTime);
+    setLocalGridSize(gridSize);
     setTimeLeft(turnTime);
-  }, [turnTime]);
+  }, [turnTime, gridSize]);
 
   useEffect(() => {
     if (newBoxes.size > 0) {
@@ -55,94 +62,26 @@ export function GameScreen({
   }, [newBoxes]);
 
   useEffect(() => {
-    if (localTurnTime === Infinity || isPaused) return;
+    if (localTurnTime === Infinity || isPaused || isGameOver) return;
+    if (isOnline && !isHost) return;
 
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          // Both players can trigger turn switch if timer runs out to ensure sync
-          // but we only switch if it's our turn OR if we are guest and host timed out
-          const canISwitch = mode === 'local' || isMyTurn || (!isHost && prev <= 0);
-          
-          if (canISwitch) {
-            setCurrentPlayer((p) => (p === 1 ? 2 : 1));
-            return localTurnTime;
-          }
-          return 0;
+          setCurrentPlayer((p) => (p === 1 ? 2 : 1));
+          return localTurnTime;
         }
         return prev - 1;
       });
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [currentPlayer, localTurnTime, isPaused, mode, isMyTurn, isHost]);
+  }, [localTurnTime, isPaused, isOnline, isHost]);
 
-  // Sync network moves and handle initial handshake
   useEffect(() => {
-    if (!connection) return;
-
-    // We use a small flag to prevent redundant name sends during initial mount
-    let hasSentInitialNames = false;
-
-    const handleData = (data: any) => {
-      console.log('GameScreen received data:', data);
-      if (data.type === 'move') {
-        applyMove(data.lineId, data.player);
-      } else if (data.type === 'names') {
-        if (data.p1) setPlayer1Name(data.p1);
-        if (data.p2) setPlayer2Name(data.p2);
-        if (data.turnTime !== undefined) {
-          setLocalTurnTime(data.turnTime);
-          setTimeLeft(data.turnTime);
-        }
-      } else if (data.type === 'handshake') {
-        console.log('Handshake received from:', data.from);
-        // If we receive any handshake, respond with names to ensure both sides are synced
-        connection.send({
-          type: 'names',
-          p1: player1Name,
-          p2: player2Name,
-          turnTime: localTurnTime
-        });
-        hasSentInitialNames = true;
-      } else if (data.type === 'heartbeat') {
-        // Keep-alive message, no action needed
-      }
-    };
-
-    connection.on('data', handleData);
-    
-    // Proactively send names when component mounts to ensure peer has them
-    // This handles the case where the handshake might have arrived before listener was ready
-    const initialSyncTimeout = setTimeout(() => {
-      if (!hasSentInitialNames) {
-        console.log('Sending proactive name sync...');
-        connection.send({
-          type: 'names',
-          p1: player1Name,
-          p2: player2Name,
-          turnTime: localTurnTime
-        });
-      }
-    }, 1000);
-
-    return () => {
-      connection.off('data', handleData);
-      clearTimeout(initialSyncTimeout);
-    };
-  }, [connection, isHost, player1Name, player2Name, localTurnTime]);
-
-  // Update names for peer when changed
-  useEffect(() => {
-    if (connection && isMyTurn && mode !== 'local') {
-      connection.send({
-        type: 'names',
-        p1: player1Name,
-        p2: player2Name,
-        turnTime: localTurnTime
-      });
-    }
-  }, [player1Name, player2Name, connection, localTurnTime, isMyTurn, mode]);
+    if (!isOnline || !socket || !roomId || !isHost || localTurnTime === Infinity) return;
+    socket.emit('game:timerSync', { roomId, timeLeft, currentPlayer });
+  }, [isOnline, socket, roomId, isHost, localTurnTime, timeLeft, currentPlayer]);
 
   const applyMove = useCallback((lineId: LineId, player: 1 | 2) => {
     setLines(prevLines => {
@@ -157,8 +96,8 @@ export function GameScreen({
         const justCompleted = new Set<string>();
         let boxesCompleted = 0;
 
-        for (let row = 0; row < gridSize - 1; row++) {
-          for (let col = 0; col < gridSize - 1; col++) {
+        for (let row = 0; row < localGridSize - 1; row++) {
+          for (let col = 0; col < localGridSize - 1; col++) {
             const boxId = `box-${row}-${col}`;
             if (nextBoxes.has(boxId)) continue;
 
@@ -186,8 +125,9 @@ export function GameScreen({
             const nextScores: [number, number] = [...prevScores];
             nextScores[player - 1] += boxesCompleted;
             
-            const totalBoxes = (gridSize - 1) * (gridSize - 1);
+            const totalBoxes = (localGridSize - 1) * (localGridSize - 1);
             if (nextBoxes.size === totalBoxes) {
+              setIsGameOver(true);
               const winner = nextScores[0] > nextScores[1] ? 1 : nextScores[1] > nextScores[0] ? 2 : 0;
               setTimeout(() => onGameEnd(winner, nextScores, [player1Name, player2Name]), 800);
             }
@@ -206,20 +146,49 @@ export function GameScreen({
 
       return nextLines;
     });
-  }, [gridSize, localTurnTime, onGameEnd, player1Name, player2Name]);
+  }, [localGridSize, localTurnTime, onGameEnd, player1Name, player2Name]);
+
+  useEffect(() => {
+    if (!isOnline || !socket) return;
+
+    const handleMove = ({ lineId, player }: { lineId: string; player: 1 | 2 }) => {
+      lastMoveTime.current = Date.now();
+      applyMove(lineId, player);
+    };
+
+    const handleNameUpdate = ({ player, name }: { player: 1 | 2; name: string }) => {
+      if (player === 1) setPlayer1Name(name);
+      if (player === 2) setPlayer2Name(name);
+    };
+
+    const handleTimerSync = ({ timeLeft: syncTimeLeft, currentPlayer: syncPlayer }: { timeLeft: number; currentPlayer: 1 | 2 }) => {
+      const timeSinceMove = Date.now() - lastMoveTime.current;
+      if (!isHost && timeSinceMove > 1500) {
+        setCurrentPlayer(syncPlayer);
+        setTimeLeft(syncTimeLeft);
+      }
+    };
+
+    socket.on('game:move', handleMove);
+    socket.on('game:nameUpdate', handleNameUpdate);
+    socket.on('game:timerSync', handleTimerSync);
+
+    return () => {
+      socket.off('game:move', handleMove);
+      socket.off('game:nameUpdate', handleNameUpdate);
+      socket.off('game:timerSync', handleTimerSync);
+    };
+  }, [isOnline, socket, isHost, applyMove]);
+
 
   const handleLineClick = (lineId: LineId) => {
-    console.log('Line clicked:', lineId, 'isMyTurn:', isMyTurn, 'currentPlayer:', currentPlayer);
-    if (lines.has(lineId) || isPaused || !isMyTurn) return;
+    if (lines.has(lineId) || isPaused || isGameOver || !isMyTurn) return;
 
+    lastMoveTime.current = Date.now();
     applyMove(lineId, currentPlayer);
 
-    if (connection) {
-      connection.send({
-        type: 'move',
-        lineId,
-        player: currentPlayer
-      });
+    if (isOnline && socket && roomId) {
+      socket.emit('game:move', { roomId, lineId, player: currentPlayer });
     }
   };
 
@@ -230,13 +199,16 @@ export function GameScreen({
       setPlayer2Name(newName || 'Player 2');
     }
     setEditingPlayer(null);
+    if (isOnline && socket && roomId) {
+      socket.emit('game:nameUpdate', { roomId, player, name: newName || `Player ${player}` });
+    }
   };
 
   const renderGrid = () => {
     const elements = [];
 
-    for (let row = 0; row < gridSize; row++) {
-      for (let col = 0; col < gridSize; col++) {
+    for (let row = 0; row < localGridSize; row++) {
+      for (let col = 0; col < localGridSize; col++) {
         elements.push(
           <div
             key={`dot-${row}-${col}`}
@@ -252,7 +224,7 @@ export function GameScreen({
           />
         );
 
-        if (col < gridSize - 1) {
+        if (col < localGridSize - 1) {
           const lineId = `h-${row}-${col}`;
           const lineOwner = lines.get(lineId);
           const isDrawn = lineOwner !== undefined;
@@ -292,7 +264,7 @@ export function GameScreen({
           );
         }
 
-        if (row < gridSize - 1) {
+        if (row < localGridSize - 1) {
           const lineId = `v-${row}-${col}`;
           const lineOwner = lines.get(lineId);
           const isDrawn = lineOwner !== undefined;
@@ -332,7 +304,7 @@ export function GameScreen({
           );
         }
 
-        if (row < gridSize - 1 && col < gridSize - 1) {
+        if (row < localGridSize - 1 && col < localGridSize - 1) {
           const boxId = `box-${row}-${col}`;
           const owner = boxes.get(boxId);
           const isNew = newBoxes.has(boxId);
@@ -379,7 +351,8 @@ export function GameScreen({
     return elements;
   };
 
-  const showPause = mode === 'quick' || mode === 'local';
+  const showPause = mode === 'local';
+  const shouldShowBoard = true;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -426,7 +399,7 @@ export function GameScreen({
                   className="w-4 h-4 rounded-full flex-shrink-0"
                   style={{ backgroundColor: 'var(--player1)' }}
                 />
-                {editingPlayer === 1 && (mode === 'local' || isHost) ? (
+                {editingPlayer === 1 ? (
                   <input
                     type="text"
                     value={player1Name}
@@ -439,10 +412,10 @@ export function GameScreen({
                   />
                 ) : (
                   <span className="text-base flex-1" style={{ color: 'var(--ink)', fontWeight: currentPlayer === 1 ? 600 : 400 }}>
-                    {player1Name} {mode !== 'local' && isHost && <span className="text-xs opacity-50 ml-1">(You)</span>}
+                    {player1Name}
                   </span>
                 )}
-                {(mode === 'local' || isHost) && (
+                {(
                   <button
                     onClick={() => setEditingPlayer(editingPlayer === 1 ? null : 1)}
                     className="p-1 hover:bg-[var(--scribble)] rounded transition-colors"
@@ -456,10 +429,10 @@ export function GameScreen({
               </div>
               {currentPlayer === 1 && (
                 <div className="text-base mt-1 animate-pulse" style={{ color: 'var(--ink)', fontWeight: 600 }}>
-                  {isMyTurn ? 'Your Turn' : `${player1Name}'s Turn`}
+                  {isOnline && playerNumber === 1 ? 'Your Turn' : `${player1Name}'s Turn`}
                 </div>
               )}
-              {currentPlayer === 1 && turnTime !== Infinity && (
+              {currentPlayer === 1 && localTurnTime !== Infinity && (
                 <div className="text-sm mt-1" style={{ color: 'var(--ink-light)' }}>
                   {timeLeft}s
                 </div>
@@ -488,7 +461,7 @@ export function GameScreen({
                   className="w-4 h-4 rounded-full flex-shrink-0"
                   style={{ backgroundColor: 'var(--player2)' }}
                 />
-                {editingPlayer === 2 && (mode === 'local' || !isHost) ? (
+                {editingPlayer === 2 ? (
                   <input
                     type="text"
                     value={player2Name}
@@ -501,10 +474,10 @@ export function GameScreen({
                   />
                 ) : (
                   <span className="text-base flex-1" style={{ color: 'var(--ink)', fontWeight: currentPlayer === 2 ? 600 : 400 }}>
-                    {player2Name} {mode !== 'local' && !isHost && <span className="text-xs opacity-50 ml-1">(You)</span>}
+                    {player2Name}
                   </span>
                 )}
-                {(mode === 'local' || !isHost) && (
+                {(
                   <button
                     onClick={() => setEditingPlayer(editingPlayer === 2 ? null : 2)}
                     className="p-1 hover:bg-[var(--scribble)] rounded transition-colors"
@@ -518,10 +491,10 @@ export function GameScreen({
               </div>
               {currentPlayer === 2 && (
                 <div className="text-base mt-1 animate-pulse" style={{ color: 'var(--ink)', fontWeight: 600 }}>
-                  {isMyTurn ? 'Your Turn' : `${player2Name}'s Turn`}
+                  {isOnline && playerNumber === 2 ? 'Your Turn' : `${player2Name}'s Turn`}
                 </div>
               )}
-              {currentPlayer === 2 && turnTime !== Infinity && (
+              {currentPlayer === 2 && localTurnTime !== Infinity && (
                 <div className="text-sm mt-1" style={{ color: 'var(--ink-light)' }}>
                   {timeLeft}s
                 </div>
@@ -532,20 +505,33 @@ export function GameScreen({
       </div>
 
       <div className="flex-1 flex items-center justify-center px-4 pb-8">
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: `repeat(${gridSize - 1}, ${CELL_SIZE}px 1fr) ${CELL_SIZE}px`,
-            gridTemplateRows: `repeat(${gridSize - 1}, ${CELL_SIZE}px 1fr) ${CELL_SIZE}px`,
-            gap: '0',
-            width: 'min(90vw, 400px)',
-            height: 'min(90vw, 400px)',
-            maxWidth: '400px',
-            maxHeight: '400px',
-          }}
-        >
-          {renderGrid()}
-        </div>
+        {shouldShowBoard ? (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: `repeat(${localGridSize - 1}, ${CELL_SIZE}px 1fr) ${CELL_SIZE}px`,
+              gridTemplateRows: `repeat(${localGridSize - 1}, ${CELL_SIZE}px 1fr) ${CELL_SIZE}px`,
+              gap: '0',
+              width: 'min(90vw, 450px)',
+              height: 'min(90vw, 450px)',
+              maxWidth: '450px',
+              maxHeight: '450px',
+            }}
+          >
+            {renderGrid()}
+          </div>
+        ) : (
+          <div
+            className="flex items-center justify-center rounded-xl border-2 px-6 py-5"
+            style={{
+              borderColor: 'var(--ink-light)',
+              backgroundColor: 'var(--paper)',
+              color: 'var(--ink)',
+            }}
+          >
+            Syncing room settings...
+          </div>
+        )}
       </div>
 
       {isPaused && (

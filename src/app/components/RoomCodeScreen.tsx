@@ -5,26 +5,33 @@ interface RoomCodeScreenProps {
   onBack: () => void;
   onCreateRoom: (code: string) => void;
   onJoinRoom: (code: string) => void;
-  isWaiting?: boolean;
+  activeRoomCode?: string | null;
 }
 
-export function RoomCodeScreen({ onBack, onCreateRoom, onJoinRoom, isWaiting }: RoomCodeScreenProps) {
-  const [mode, setMode] = useState<'select' | 'create' | 'join'>('select');
-  const [roomCode, setRoomCode] = useState('');
+export function RoomCodeScreen({ onBack, onCreateRoom, onJoinRoom, activeRoomCode }: RoomCodeScreenProps) {
+  const [mode, setMode] = useState<'select' | 'create' | 'join'>(activeRoomCode ? 'create' : 'select');
+  const [roomCode, setRoomCode] = useState(activeRoomCode || '');
   const [joinCode, setJoinCode] = useState('');
   const [copied, setCopied] = useState(false);
 
+  useEffect(() => {
+    if (activeRoomCode) {
+      setRoomCode(activeRoomCode);
+      setMode('create');
+    } else if (activeRoomCode === null && mode === 'create') {
+      // If activeRoomCode becomes null while we are in create mode, 
+      // it means the hosting was cancelled or reset.
+      setMode('select');
+      setRoomCode('');
+    }
+  }, [activeRoomCode, mode]);
+
   const generateRoomCode = () => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    setRoomCode(code);
+    // We don't set mode or roomCode here anymore; 
+    // we wait for App to pass it back via activeRoomCode prop
     onCreateRoom(code);
   };
-
-  useEffect(() => {
-    if (isWaiting && mode === 'select') {
-      setMode('create');
-    }
-  }, [isWaiting, mode]);
 
   const handleCopyCode = async () => {
     try {
