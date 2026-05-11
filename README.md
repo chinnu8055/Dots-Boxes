@@ -3,6 +3,8 @@
 
 A modern take on the classic Dots & Boxes game with local and online play. The web client is built with React + Vite, and the multiplayer server uses Express + Socket.IO.
 
+**Live Demo:** https://dots-and-boxes-alpha.vercel.app/
+
 ## Features
 
 - Local (same device) and online multiplayer modes
