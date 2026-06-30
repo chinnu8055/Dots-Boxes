@@ -235,9 +235,9 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('game:nameUpdate', { player, name });
   });
 
-  socket.on('game:timerSync', ({ roomId, timeLeft, currentPlayer }) => {
+  socket.on('game:timerSync', ({ roomId, timeLeft, currentPlayer, bonusTurnFor }) => {
     if (!roomId) return;
-    socket.to(roomId).emit('game:timerSync', { timeLeft, currentPlayer });
+    socket.to(roomId).emit('game:timerSync', { timeLeft, currentPlayer, bonusTurnFor });
   });
 
   socket.on('game:config', ({ roomId, turnTime, gridSize }) => {

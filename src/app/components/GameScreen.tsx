@@ -39,6 +39,7 @@ export function GameScreen({
   const [localTurnTime, setLocalTurnTime] = useState(turnTime);
   const [localGridSize, setLocalGridSize] = useState(gridSize);
   const [timeLeft, setTimeLeft] = useState(turnTime);
+  const [bonusTurnFor, setBonusTurnFor] = useState<1 | 2 | null>(null);
   const [player1Name, setPlayer1Name] = useState('Player 1');
   const [player2Name, setPlayer2Name] = useState('Player 2');
   const [editingPlayer, setEditingPlayer] = useState<1 | 2 | null>(null);
@@ -68,7 +69,11 @@ export function GameScreen({
     const timer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
-          setCurrentPlayer((p) => (p === 1 ? 2 : 1));
+          setCurrentPlayer((p) => {
+            const nextPlayer = p === 1 ? 2 : 1;
+            setBonusTurnFor(nextPlayer);
+            return nextPlayer;
+          });
           return localTurnTime;
         }
         return prev - 1;
@@ -80,10 +85,12 @@ export function GameScreen({
 
   useEffect(() => {
     if (!isOnline || !socket || !roomId || !isHost || localTurnTime === Infinity) return;
-    socket.emit('game:timerSync', { roomId, timeLeft, currentPlayer });
-  }, [isOnline, socket, roomId, isHost, localTurnTime, timeLeft, currentPlayer]);
+    socket.emit('game:timerSync', { roomId, timeLeft, currentPlayer, bonusTurnFor });
+  }, [isOnline, socket, roomId, isHost, localTurnTime, timeLeft, currentPlayer, bonusTurnFor]);
 
   const applyMove = useCallback((lineId: LineId, player: 1 | 2) => {
+    const hasBonusTurn = bonusTurnFor === player;
+
     setLines(prevLines => {
       if (prevLines.has(lineId)) return prevLines;
       
@@ -134,10 +141,18 @@ export function GameScreen({
             return nextScores;
           });
           setNewBoxes(justCompleted);
+          if (hasBonusTurn) {
+            setBonusTurnFor(null);
+          }
           setTimeLeft(localTurnTime); // Reset timer for same player
         } else {
           // Switch turns
-          setCurrentPlayer(player === 1 ? 2 : 1);
+          if (hasBonusTurn) {
+            setBonusTurnFor(null);
+            setCurrentPlayer(player);
+          } else {
+            setCurrentPlayer(player === 1 ? 2 : 1);
+          }
           setTimeLeft(localTurnTime);
         }
 
@@ -146,7 +161,7 @@ export function GameScreen({
 
       return nextLines;
     });
-  }, [localGridSize, localTurnTime, onGameEnd, player1Name, player2Name]);
+  }, [bonusTurnFor, localGridSize, localTurnTime, onGameEnd, player1Name, player2Name]);
 
   useEffect(() => {
     if (!isOnline || !socket) return;
@@ -161,11 +176,12 @@ export function GameScreen({
       if (player === 2) setPlayer2Name(name);
     };
 
-    const handleTimerSync = ({ timeLeft: syncTimeLeft, currentPlayer: syncPlayer }: { timeLeft: number; currentPlayer: 1 | 2 }) => {
+    const handleTimerSync = ({ timeLeft: syncTimeLeft, currentPlayer: syncPlayer, bonusTurnFor: syncBonusTurnFor }: { timeLeft: number; currentPlayer: 1 | 2; bonusTurnFor?: 1 | 2 | null }) => {
       const timeSinceMove = Date.now() - lastMoveTime.current;
       if (!isHost && timeSinceMove > 1500) {
         setCurrentPlayer(syncPlayer);
         setTimeLeft(syncTimeLeft);
+        setBonusTurnFor(syncBonusTurnFor ?? null);
       }
     };
 
@@ -437,6 +453,11 @@ export function GameScreen({
                   {timeLeft}s
                 </div>
               )}
+              {currentPlayer === 1 && bonusTurnFor === 1 && (
+                <div className="text-xs mt-1 font-semibold" style={{ color: 'var(--ink)' }}>
+                  Bonus chance
+                </div>
+              )}
             </div>
           </div>
 
@@ -497,6 +518,11 @@ export function GameScreen({
               {currentPlayer === 2 && localTurnTime !== Infinity && (
                 <div className="text-sm mt-1" style={{ color: 'var(--ink-light)' }}>
                   {timeLeft}s
+                </div>
+              )}
+              {currentPlayer === 2 && bonusTurnFor === 2 && (
+                <div className="text-xs mt-1 font-semibold" style={{ color: 'var(--ink)' }}>
+                  Bonus chance
                 </div>
               )}
             </div>
