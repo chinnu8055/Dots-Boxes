@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, Component, type ReactNode } from 'react';
 import { io, type Socket } from 'socket.io-client';
+import { Analytics } from '@vercel/analytics/react';
 import { HomeScreen } from './components/HomeScreen';
 import { ModeSelectionModal } from './components/ModeSelectionModal';
 import { RoomCodeScreen } from './components/RoomCodeScreen';
@@ -407,6 +408,7 @@ function GameApp() {
           onSelectMode={handleSelectMode}
         />
       )}
+      <Analytics />
     </div>
   );
 }
